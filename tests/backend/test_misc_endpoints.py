@@ -65,23 +65,26 @@ class TestDemandEndpoints:
                 assert percent_change < 2.0, \
                     f"Item {item['item_name']} has {percent_change:.2f}% change, expected < 2%"
 
-    def test_demand_forecast_has_new_items(self, client):
-        """Test that new demand forecast items exist."""
+    def test_demand_forecast_references_real_inventory_skus(self, client):
+        """Test that demand forecast SKUs correspond to real inventory items.
+
+        demand_forecasts.json was regenerated to reference actual inventory.json
+        SKUs - it previously used a fictitious, non-overlapping catalog (e.g.
+        WDG-001, SNR-420), which made joining forecasts to inventory unit_cost
+        by SKU impossible.
+        """
         response = client.get("/api/demand")
         data = response.json()
-
-        # Check for the new items we added
         skus = [item["item_sku"] for item in data]
 
-        # Should have Temperature Sensor Module and Logic Controller Board
-        assert "SNR-420" in skus, "Missing Temperature Sensor Module"
-        assert "CTL-330" in skus, "Missing Logic Controller Board"
+        # Spot-check a representative sample of the real inventory SKUs now used
+        assert "PCB-001" in skus
+        assert "MCU-401" in skus
+        assert "PSU-501" in skus
 
-        # Verify they are marked as stable
-        for item in data:
-            if item["item_sku"] in ["SNR-420", "CTL-330"]:
-                assert item["trend"].lower() == "stable", \
-                    f"New item {item['item_name']} should have stable trend"
+        # The old fictitious catalog should no longer be present
+        assert "WDG-001" not in skus
+        assert "SNR-420" not in skus
 
 
 class TestBacklogEndpoints:
