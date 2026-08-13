@@ -1,8 +1,12 @@
+import random
+import threading
+import uuid
+from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
-from pydantic import BaseModel
-from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
+from pydantic import BaseModel, Field
+from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders, restocking_orders
 
 app = FastAPI(title="Factory Inventory Management System")
 
@@ -120,6 +124,27 @@ class CreatePurchaseOrderRequest(BaseModel):
     expected_delivery_date: str
     notes: Optional[str] = None
 
+class RestockingOrderItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int = Field(gt=0)
+    unit_cost: float = Field(ge=0)
+
+class RestockingOrder(BaseModel):
+    id: str
+    order_number: str
+    items: List[RestockingOrderItem]
+    budget: float
+    total_cost: float
+    status: str = "Submitted"
+    created_date: str
+    lead_time_days: int
+    expected_delivery: str
+
+class CreateRestockingOrderRequest(BaseModel):
+    items: List[RestockingOrderItem]
+    budget: float = Field(ge=0)
+
 # API endpoints
 @app.get("/")
 def root():
@@ -178,6 +203,45 @@ def get_backlog():
         item_dict["has_purchase_order"] = has_po
         result.append(item_dict)
     return result
+
+@app.get("/api/restocking-orders", response_model=List[RestockingOrder])
+def get_restocking_orders():
+    """Get all submitted restocking orders (in-memory only; resets on server restart)"""
+    return restocking_orders
+
+# FastAPI runs sync `def` endpoints in a thread pool, so concurrent POSTs could
+# both read len(restocking_orders) before either appends, producing duplicate
+# ids/order_numbers. This lock makes the read-generate-append sequence atomic.
+_restocking_order_lock = threading.Lock()
+
+@app.post("/api/restocking-orders", response_model=RestockingOrder, status_code=201)
+def create_restocking_order(request: CreateRestockingOrderRequest):
+    """Accept a fully-formed restocking order; the recommendation itself is computed client-side"""
+    # Recompute total_cost server-side rather than trusting the client-supplied value
+    total_cost = round(sum(item.quantity * item.unit_cost for item in request.items), 2)
+
+    # No lead-time data exists anywhere in this demo's fixtures, so randomize 7-14 days
+    # per order, matching the random.randint(7, 14) convention used for order delivery
+    # in generate_data.py, to keep behavior consistent with the rest of the app.
+    lead_time_days = random.randint(7, 14)
+    created_dt = datetime.now()
+    expected_delivery_dt = created_dt + timedelta(days=lead_time_days)
+
+    with _restocking_order_lock:
+        sequence_number = len(restocking_orders) + 1
+        new_order = {
+            "id": str(uuid.uuid4()),
+            "order_number": f"RSK-{created_dt.year}-{sequence_number:04d}",
+            "items": [item.model_dump() for item in request.items],
+            "budget": request.budget,
+            "total_cost": total_cost,
+            "status": "Submitted",
+            "created_date": created_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            "lead_time_days": lead_time_days,
+            "expected_delivery": expected_delivery_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        restocking_orders.append(new_order)
+    return new_order
 
 @app.get("/api/dashboard/summary")
 def get_dashboard_summary(
